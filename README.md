@@ -11,7 +11,7 @@ since it switched on.
 | | |
 |---|---|
 | New plants (EIA plant IDs) | **1,346**: 582 of 5 MW and up (58.9 GW), 764 under 5 MW (1.7 GW) |
-| of which 20 MW and up | **289** (56.3 GW) |
+| of which 20 MW and up | **289** (56.4 GW) |
 | Generating units | **1,591** |
 | Nameplate capacity | **60.6 GW** |
 | Measured net generation, Jan 2015 – Aug 2026 | **1,663 TWh** |
