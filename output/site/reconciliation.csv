@@ -1,0 +1,7 @@
+step,basis,units,gw
+1,"All new units, nameplate, Jan 2015 - Sep 2026",1591,60.6
+2,less 2015-2019 additions (PJM counts from 2020),1003,30.71
+3,less units reporting a non-PJM interconnection,957,30.24
+4,less 2026 additions (through Dec 2025),865,27.54
+5,less projects under 20 MW (queue scale),210,25.33
+6,on NET SUMMER capacity,210,24.46

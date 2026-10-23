@@ -1,0 +1,6 @@
+.eia_env
+*.pyc
+__pycache__/
+# EIA downloads and parsed caches: large, and rebuilt by the scripts
+data/raw/
+data/interim/
