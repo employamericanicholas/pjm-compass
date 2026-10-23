@@ -10,7 +10,8 @@ since it switched on.
 
 | | |
 |---|---|
-| New plants (EIA plant IDs) | **1,346** |
+| New plants (EIA plant IDs) | **1,346**: 582 of 5 MW and up (58.9 GW), 764 under 5 MW (1.7 GW) |
+| of which 20 MW and up | **289** (56.3 GW) |
 | Generating units | **1,591** |
 | Nameplate capacity | **60.6 GW** |
 | Measured net generation, Jan 2015 – Aug 2026 | **1,663 TWh** |
@@ -121,4 +122,6 @@ To refresh with a newer EIA-860M, download it and update `LATEST`, `LATEST_LABEL
 `scripts/fetch_generation.py`.
 
 The site is static: `index.html`, `assets/`, and the CSVs in `output/site/`, served
-by GitHub Pages from `main`.
+by GitHub Pages from `main`. It has two tabs, plants of 5 MW and up (`#large`) and
+under 5 MW (`#small`), each with its own totals, generation chart, plant map
+(Leaflet on OpenStreetMap tiles), owner ranking and plant table.

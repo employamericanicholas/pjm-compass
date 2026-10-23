@@ -22,6 +22,7 @@ GEN = "output/pjm_generation_by_project_year.csv"
 GEN_TECH = "output/summary_generation_by_year.csv"
 OWNERS = "data/manual/parent_owners.csv"
 OUT = "output/site"
+SMALL_MW = 5
 
 TECH_GROUP = {
     "Natural Gas Fired Combined Cycle": "Gas combined cycle",
@@ -116,10 +117,19 @@ def main():
     r["gen_total_gwh"] = r[gcols].sum(axis=1, min_count=1)
     r["gen_reported"] = np.where(r.gen_total_gwh.notna(), "yes", "no EIA-923 record")
 
+    # the site splits plants at 5 MW: below it is mostly community and rooftop-scale solar
+    r["size_class"] = np.where(r.capacity_added_mw < SMALL_MW, "under 5 MW", "5 MW and up")
+    # EIA codes these to PJM, but the plant reports a utility outside it (see enrich_eia860.py)
+    flag = (u[u.non_pjm_interconnection.notna()].drop_duplicates("eia_plant_id")
+              .set_index("eia_plant_id").non_pjm_interconnection)
+    r["interconnection_flag"] = r.eia_plant_id.map(flag).map(
+        lambda v: "reports a utility in %s, not PJM" % v if pd.notna(v) else "")
+
     keep = ["eia_plant_id", "plant_name", "parent_owner", "ownership_detail", "owner_basis",
-            "owner_source_url", "owner", "tech_group", "technology", "site", "status",
-            "first_unit_online", "capacity_added_mw", "net_summer_mw", "state", "county",
-            "pjm_zone", "interconnecting_utility", "capacity_factor_est", "gen_reported",
+            "owner_source_url", "owner", "tech_group", "technology", "site", "size_class",
+            "status", "first_unit_online", "capacity_added_mw", "net_summer_mw", "state",
+            "county", "latitude", "longitude", "pjm_zone", "interconnecting_utility",
+            "interconnection_flag", "capacity_factor_est", "gen_reported",
             "gen_total_gwh"] + gcols
     out = r[keep].rename(columns={"owner": "eia_operator", "capacity_added_mw": "nameplate_mw",
                                   "capacity_factor_est": "cf_2025_or_benchmark"})

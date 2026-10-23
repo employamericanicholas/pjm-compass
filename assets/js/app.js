@@ -1,57 +1,98 @@
 // PJM Build Ledger: loads the three CSVs that scripts/build_site_data.py writes and
 // draws the page from them. No figure is hard-coded here.
+//
+// Two tabs split the plants at 5 MW (#large, #small). Every card on the page
+// redraws from the current tab's plants; the map and the plant table share one set
+// of filters. Plant names come from EIA and enter the DOM through textContent only.
 (() => {
   const DATA = './output/site/';
+  const TABS = {
+    large: { cls: '5 MW and up', label: 'plants of 5 MW or more' },
+    small: { cls: 'under 5 MW', label: 'plants under 5 MW' },
+  };
   const TECH_ORDER = ['Gas combined cycle', 'Gas & oil peaking', 'Solar', 'Wind', 'Storage', 'Other'];
   const TECH_VAR = {
     'Gas combined cycle': '--tech-gas-cc', 'Gas & oil peaking': '--tech-gas-peak', Solar: '--tech-solar',
     Wind: '--tech-wind', Storage: '--tech-storage', Other: '--tech-other',
   };
+  // the PJM footprint, northern Illinois to the Delmarva coast
+  const PJM_BOUNDS = [[35.2, -90.6], [42.6, -74.0]];
   const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
   const fmtInt = d3.format(',');
   const fmt1 = d3.format(',.1f');
   const num = (x) => (x === '' || x == null || isNaN(+x) ? null : +x);
   const n0 = (x) => num(x) ?? 0;
   const monthName = (ym) => new Date(ym + '-01T00:00:00Z').toLocaleString('en', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const techOrder = (groups) => TECH_ORDER.filter((k) => groups.includes(k)).concat(groups.filter((k) => !TECH_ORDER.includes(k)));
 
-  const S = { mode: 'tech', q: '', tech: '', site: '', owner: '', sort: 'nameplate_mw', dir: -1, picked: null };
-  let plants = [], coverage = [], rec = [], yearCols = [], owners = [];
+  const S = { tab: 'large', mode: 'tech', q: '', tech: '', site: '', owner: '', sort: 'nameplate_mw', dir: -1, picked: null };
+  let ALL = [], plants = [], coverage = [], rec = [], yearCols = [], owners = [], lastFull = null, partial = null;
 
   // ------------------------------------------------------------------ summary
   function summarize() {
-    const full = coverage.filter((c) => +c.months === 12).map((c) => +c.year);
-    const lastFull = Math.max(...full);
     const mw = d3.sum(plants, (p) => n0(p.nameplate_mw));
-    const researched = d3.sum(plants.filter((p) => String(p.owner_basis).startsWith('researched')), (p) => n0(p.nameplate_mw));
     const twh = d3.sum(plants, (p) => n0(p.gen_total_gwh)) / 1000;
     const twhLast = d3.sum(plants, (p) => n0(p['gen_' + lastFull + '_gwh'])) / 1000;
     const cods = plants.map((p) => p.first_unit_online).sort();
-    const partial = coverage.filter((c) => +c.months < 12).sort((a, b) => b.year - a.year)[0];
+    const big = (v) => (v >= 100 ? fmtInt(Math.round(v)) : fmt1(v));
+    const set = (id, value, unit) => {
+      const t = document.getElementById(id);
+      t.replaceChildren(document.createTextNode(value));
+      if (unit) t.append(el('small', null, unit));
+    };
 
-    const set = (id, html) => { document.getElementById(id).innerHTML = html; };
+    document.getElementById('t-plants-k').textContent = S.tab === 'large' ? 'Plants of 5 MW and up' : 'Plants under 5 MW';
     set('t-plants', fmtInt(plants.length));
-    set('t-gw', fmt1(mw / 1000) + '<small>GW</small>');
-    set('t-twh', fmtInt(Math.round(twh)) + '<small>TWh</small>');
+    set('t-gw', mw >= 10000 ? fmt1(mw / 1000) : fmtInt(Math.round(mw)), mw >= 10000 ? 'GW' : 'MW');
+    set('t-twh', big(twh), 'TWh');
     document.getElementById('t-last-k').textContent = 'Generated in ' + lastFull;
-    set('t-last', fmt1(twhLast) + '<small>TWh</small>');
-    set('t-own', Math.round(100 * researched / mw) + '<small>%</small>');
+    set('t-last', big(twhLast), 'TWh');
 
     const lede = document.getElementById('lede');
-    lede.replaceChildren();
-    const b = (t) => { const e = document.createElement('b'); e.textContent = t; return e; };
+    const b = (t) => el('b', null, t);
     const txt = (t) => document.createTextNode(t);
-    lede.append(b(fmtInt(plants.length)), txt(' new power plants came online in the PJM grid between '),
-      txt(monthName(cods[0]) + ' and ' + monthName(cods[cods.length - 1])), txt(', adding '),
-      b(fmt1(mw / 1000) + ' GW'), txt(' of capacity. They have generated '), b(fmtInt(Math.round(twh)) + ' TWh'),
-      txt(' since, '), b(fmt1(twhLast) + ' TWh'), txt(' of it in ' + lastFull + '.'));
-
-    if (partial) {
-      const lastM = new Date(Date.UTC(+partial.year, +partial.months - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' });
-      document.getElementById('gen-foot').textContent =
-        `* ${partial.year} runs January to ${lastM}, and ${partial.pct_mw_reporting}% of online capacity has reported so far, ` +
-        'because small plants report to EIA once a year. Battery output is net of charging, so storage reads slightly negative and is left off the bars.';
-      document.getElementById('vintage').textContent = `EIA-860M Sep 2026 · EIA-923 through ${lastM} ${partial.year}`;
+    lede.replaceChildren();
+    if (S.tab === 'large') {
+      const researched = d3.sum(plants.filter((p) => String(p.owner_basis).startsWith('researched')), (p) => n0(p.nameplate_mw));
+      document.getElementById('t-five-k').textContent = 'Capacity with a researched owner';
+      set('t-five', String(Math.round(100 * researched / mw)), '%');
+      const over20 = plants.filter((p) => n0(p.nameplate_mw) >= 20).length;
+      const huge = plants.filter((p) => n0(p.nameplate_mw) >= 500);
+      const hugeShare = d3.sum(huge, (p) => n0(p.gen_total_gwh)) / (twh * 1000);
+      lede.append(b(fmtInt(plants.length)), txt(` power plants of 5 MW or more came online in the PJM grid between ${monthName(cods[0])} and ${monthName(cods[cods.length - 1])}, `),
+        txt('adding '), b(fmt1(mw / 1000) + ' GW'), txt(' of capacity. '), b(fmtInt(over20)), txt(' of them are 20 MW or larger. They have generated '),
+        b(fmtInt(Math.round(twh)) + ' TWh'), txt(' since, '), b(fmt1(twhLast) + ' TWh'), txt(` of it in ${lastFull}, and the `),
+        b(String(huge.length)), txt(` plants of 500 MW or more produced ${Math.round(100 * hugeShare)}% of it.`));
+    } else {
+      const solar = plants.filter((p) => p.tech_group === 'Solar').length;
+      document.getElementById('t-five-k').textContent = 'Of them, solar';
+      set('t-five', String(Math.round(100 * solar / plants.length)), '%');
+      lede.append(b(fmtInt(plants.length)), txt(` plants under 5 MW came online in PJM between ${monthName(cods[0])} and ${monthName(cods[cods.length - 1])}, `),
+        txt('most of them community and commercial solar. Together they add '), b(fmtInt(Math.round(mw)) + ' MW'),
+        txt(' and have generated '), b(fmt1(twh) + ' TWh'), txt(' since, '), b(fmt1(twhLast) + ' TWh'), txt(` of it in ${lastFull}.`));
     }
+
+    document.getElementById('owners-sub').textContent = S.tab === 'large'
+      ? 'Parent owners ranked by capacity added. Plants of 20 MW or more were researched one by one; smaller ones show the owner EIA lists. Click an owner to see their plants.'
+      : 'Owners as EIA lists them, usually the operating company. Plants this small were not researched one by one. Click an owner to see their plants.';
+    document.getElementById('reconciliation').hidden = S.tab !== 'large';
+  }
+
+  // Coverage of the partial year is measured on this tab's own plants: small plants
+  // report to EIA once a year, so the small tab's latest year is close to empty.
+  function footnote() {
+    if (!partial) return;
+    const lastM = new Date(Date.UTC(+partial.year, +partial.months - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' });
+    const col = 'gen_' + partial.year + '_gwh';
+    const online = plants.filter((p) => p.first_unit_online < partial.year + '-' + String(partial.months).padStart(2, '0'));
+    const mw = d3.sum(online, (p) => n0(p.nameplate_mw));
+    const pct = mw ? Math.round(100 * d3.sum(online.filter((p) => num(p[col]) != null), (p) => n0(p.nameplate_mw)) / mw) : 0;
+    document.getElementById('gen-foot').textContent =
+      `* ${partial.year} runs January to ${lastM}, and ${pct}% of this tab's online capacity has reported for it so far, ` +
+      'because smaller plants report to EIA once a year; the bar will grow when EIA publishes annual data. ' +
+      'Battery output is net of charging, so storage reads slightly negative and is left off the bars.';
+    document.getElementById('vintage').textContent = `EIA-860M Sep 2026 · EIA-923 through ${lastM} ${partial.year}`;
   }
 
   // ------------------------------------------------------------------ chart
@@ -60,19 +101,20 @@
     for (const c of yearCols) {
       const y = +c.slice(4, 8);
       for (const p of plants) {
-        const g = S.mode === 'tech' ? p.tech_group : String(p.cod_year);
-        const k = y + '|' + g;
+        const k = y + '|' + (S.mode === 'tech' ? p.tech_group : String(p.cod_year));
         by.set(k, (by.get(k) || 0) + n0(p[c]));
       }
     }
     const years = yearCols.map((c) => +c.slice(4, 8));
     let keys = [...new Set(plants.map((p) => (S.mode === 'tech' ? p.tech_group : String(p.cod_year))))];
-    keys = S.mode === 'tech'
-      ? TECH_ORDER.filter((k) => keys.includes(k)).concat(keys.filter((k) => !TECH_ORDER.includes(k)))
-      : keys.sort((a, b) => a - b);
+    keys = S.mode === 'tech' ? techOrder(keys) : keys.sort((a, b) => a - b);
+    const gwh = years.map((y) => d3.sum(keys, (k) => by.get(y + '|' + k) || 0));
+    // the small-plant tab totals a few TWh a year at most, which reads better in GWh
+    const unit = d3.max(gwh) >= 10000 ? 'TWh' : 'GWh';
+    const div = unit === 'TWh' ? 1000 : 1;
     const wide = years.map((y) => {
       const o = { year: y };
-      for (const k of keys) o[k] = (by.get(y + '|' + k) || 0) / 1000;
+      for (const k of keys) o[k] = (by.get(y + '|' + k) || 0) / div;
       return o;
     });
     const color = new Map();
@@ -81,26 +123,23 @@
       const ramp = d3.interpolateRgb(css('--cohort-old'), css('--cohort-new'));
       keys.forEach((k, i) => color.set(k, ramp(keys.length > 1 ? i / (keys.length - 1) : 0)));
     }
-    return { years, keys, wide, color };
+    return { years, keys, wide, color, unit };
   }
 
   const box = document.getElementById('gen-chart');
   const legend = document.getElementById('gen-legend');
-  const tip = document.createElement('div');
-  tip.className = 'tip'; tip.hidden = true;
+  const tip = el('div', 'tip'); tip.hidden = true;
 
   function drawChart() {
-    const { years, keys, wide, color } = series();
+    const { years, keys, wide, color, unit } = series();
     const months = new Map(coverage.map((c) => [+c.year, +c.months]));
     const label = (k) => (S.mode === 'tech' ? k : 'Online ' + k);
     box.replaceChildren();
-    legend.replaceChildren();
-    for (const k of keys) {
-      const s = document.createElement('span');
-      const i = document.createElement('i'); i.style.background = color.get(k);
+    legend.replaceChildren(...keys.map((k) => {
+      const s = el('span'); const i = el('i'); i.style.background = color.get(k);
       s.append(i, document.createTextNode(label(k)));
-      legend.append(s);
-    }
+      return s;
+    }));
 
     const W = Math.max(300, box.clientWidth), H = 360, bottom = 26, top = 18;
     const pos = (o) => keys.reduce((s, k) => s + Math.max(0, o[k]), 0);
@@ -116,7 +155,7 @@
         .attr('stroke', t === 0 ? css('--rule-strong') : css('--rule')).attr('stroke-width', 1);
       svg.append('text').attr('x', left - 8).attr('y', y(t)).attr('dy', '0.32em').attr('text-anchor', 'end').text(fmtInt(t));
     }
-    svg.append('text').attr('x', 0).attr('y', 4).attr('dy', '0.32em').text('TWh');
+    svg.append('text').attr('x', 0).attr('y', 4).attr('dy', '0.32em').text(unit);
 
     const every = x.bandwidth() < 30 ? 2 : 1;
     years.forEach((yr, i) => {
@@ -146,30 +185,24 @@
       .on('mousemove', (event, o) => {
         hi.attr('visibility', 'visible').attr('x', x(o.year) + off - 1.5).attr('width', bw + 3)
           .attr('y', y(pos(o)) - 1.5).attr('height', Math.max(0, y(0) - y(pos(o))) + 3);
-        tip.replaceChildren();
-        const h = document.createElement('div'); h.className = 'tip__h';
         const m = months.get(o.year) ?? 12;
-        h.textContent = m < 12
+        const rows = [el('div', 'tip__h', m < 12
           ? `${o.year}, January to ${new Date(Date.UTC(o.year, m - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' })}`
-          : String(o.year);
-        tip.append(h);
+          : String(o.year))];
         for (const k of [...keys].reverse()) {
           if (Math.abs(o[k]) < 0.05) continue;
-          const r = document.createElement('div'); r.className = 'tip__r';
-          const i = document.createElement('i'); i.style.background = color.get(k);
-          const v = document.createElement('b'); v.textContent = fmt1(o[k]) + ' TWh';
-          r.append(i, document.createTextNode(label(k)), v);
-          tip.append(r);
+          const r = el('div', 'tip__r'); const i = el('i'); i.style.background = color.get(k);
+          r.append(i, document.createTextNode(label(k)), el('b', null, fmt1(o[k]) + ' ' + unit));
+          rows.push(r);
         }
-        const t = document.createElement('div'); t.className = 'tip__r tip__r--total';
-        const tv = document.createElement('b'); tv.textContent = fmt1(keys.reduce((s, k) => s + o[k], 0)) + ' TWh';
-        t.append(document.createTextNode('Total'), tv);
-        tip.append(t);
+        const t = el('div', 'tip__r tip__r--total');
+        t.append(document.createTextNode('Total'), el('b', null, fmt1(keys.reduce((s, k) => s + o[k], 0)) + ' ' + unit));
+        rows.push(t);
+        tip.replaceChildren(...rows);
         tip.hidden = false;
         const [px, py] = d3.pointer(event, box);
         const tw = tip.offsetWidth, th = tip.offsetHeight;
-        const lx = px + 16 + tw > box.clientWidth ? px - tw - 16 : px + 16;
-        tip.style.left = Math.max(0, lx) + 'px';
+        tip.style.left = Math.max(0, px + 16 + tw > box.clientWidth ? px - tw - 16 : px + 16) + 'px';
         tip.style.top = Math.max(0, Math.min(box.clientHeight - th, py - th / 2)) + 'px';
       })
       .on('mouseleave', () => { tip.hidden = true; hi.attr('visibility', 'hidden'); });
@@ -185,6 +218,120 @@
   document.getElementById('mode-tech').addEventListener('click', () => setMode('tech'));
   document.getElementById('mode-cohort').addEventListener('click', () => setMode('cohort'));
 
+  // ------------------------------------------------------------------ map
+  const mapHost = document.getElementById('plant-map');
+  let map = null, layer = null;
+  const markers = new Map();
+
+  function initMap() {
+    const L = window.L;
+    if (!L) {
+      mapHost.classList.add('plantmap--failed');
+      mapHost.textContent = 'The map library did not load. The plant table below has every plant.';
+      return;
+    }
+    map = L.map(mapHost, { preferCanvas: true, zoomSnap: 0.5, minZoom: 4, maxZoom: 15, scrollWheelZoom: false, dragging: !L.Browser.mobile });
+    map.fitBounds(PJM_BOUNDS);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+    // scroll-to-zoom only after the map is clicked, so page scrolling never gets caught
+    map.on('click focus', () => map.scrollWheelZoom.enable());
+    map.on('mouseout blur', () => map.scrollWheelZoom.disable());
+    layer = L.layerGroup().addTo(map);
+  }
+
+  function sparkline(p) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const vals = yearCols.map((c) => ({ y: +c.slice(4, 8), v: num(p[c]) }));
+    const W = 250, H = 58, top = 4, bottom = 14;
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'pop__spark');
+    const max = d3.max(vals, (d) => Math.max(0, d.v ?? 0)) || 1;
+    const x = d3.scaleBand(vals.map((d) => d.y), [0, W]).paddingInner(0.2);
+    const y = d3.scaleLinear([0, max], [H - bottom, top]);
+    const fill = css(TECH_VAR[p.tech_group] || '--tech-other');
+    for (const d of vals) {
+      if (d.v == null || d.v <= 0) continue;
+      const r = document.createElementNS(NS, 'rect');
+      r.setAttribute('x', x(d.y)); r.setAttribute('width', x.bandwidth());
+      r.setAttribute('y', y(d.v)); r.setAttribute('height', Math.max(1, y(0) - y(d.v)));
+      r.setAttribute('fill', fill); r.setAttribute('rx', 1.5);
+      svg.append(r);
+    }
+    for (const d of [vals[0], vals[vals.length - 1]]) {
+      const t = document.createElementNS(NS, 'text');
+      t.setAttribute('x', x(d.y) + (d === vals[0] ? 0 : x.bandwidth())); t.setAttribute('y', H - 2);
+      t.setAttribute('text-anchor', d === vals[0] ? 'start' : 'end');
+      t.textContent = d.y + ((d.y === +partial?.year) ? '*' : '');
+      svg.append(t);
+    }
+    return svg;
+  }
+
+  function popup(p) {
+    const box = el('div', 'pop');
+    box.append(el('div', 'pop__name', p.plant_name));
+    box.append(el('div', 'pop__meta', `${p.tech_group} · ${fmt1(n0(p.nameplate_mw))} MW · online ${monthName(p.first_unit_online)}`));
+    const row = (k, v) => { const r = el('div', 'pop__row'); r.append(el('span', null, k), el('span', null, v)); return r; };
+    box.append(row('Owner', p.parent_owner));
+    box.append(row('Location', `${p.county}${/county|city/i.test(p.county) ? '' : ' County'}, ${p.state}`));
+    if (p.pjm_zone) box.append(row('PJM zone', p.pjm_zone));
+    if (p.interconnection_flag) box.append(el('div', 'pop__flag', 'Note: ' + p.interconnection_flag));
+    if (num(p.gen_total_gwh) != null) {
+      box.append(el('div', 'pop__meta', `Generated ${fmt1(n0(p.gen_total_gwh))} GWh since it came online` +
+        (num(p['gen_' + lastFull + '_gwh']) != null ? `, ${fmt1(n0(p['gen_' + lastFull + '_gwh']))} GWh in ${lastFull}` : '') + ':'));
+      box.append(sparkline(p));
+    } else box.append(el('div', 'pop__meta', 'No generation reported to EIA-923 yet.'));
+    const go = el('button', null, 'Year-by-year figures and ownership source');
+    go.type = 'button';
+    go.addEventListener('click', () => {
+      S.picked = p.eia_plant_id;
+      drawPlants();
+      document.querySelector(`#plant-table tr[data-key="${CSS.escape(p.eia_plant_id)}"]`)?.scrollIntoView({ block: 'nearest' });
+      detail.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    box.append(go);
+    return box;
+  }
+
+  function drawMap(list) {
+    const mapLegend = document.getElementById('map-legend');
+    const groups = techOrder([...new Set(plants.map((p) => p.tech_group))]);
+    mapLegend.replaceChildren(...groups.map((g) => {
+      const s = el('span'); const i = el('i'); i.style.background = css(TECH_VAR[g] || '--tech-other'); i.style.borderRadius = '50%';
+      s.append(i, document.createTextNode(g));
+      return s;
+    }));
+    if (!map) return;
+    const L = window.L;
+    layer.clearLayers();
+    markers.clear();
+    const maxMw = d3.max(plants, (p) => n0(p.nameplate_mw)) || 1;
+    // dot area tracks MW within the tab; small plants get a tighter range so they don't pile up
+    const [rMin, rMax] = S.tab === 'large' ? [3, 18] : [2.5, 7];
+    const radius = (mw) => rMin + (rMax - rMin) * Math.sqrt(Math.max(0, mw) / maxMw);
+    const ink = css('--ink-strong');
+    // largest first, so small plants draw on top and stay clickable
+    for (const p of [...list].sort((a, b) => n0(b.nameplate_mw) - n0(a.nameplate_mw))) {
+      const lat = num(p.latitude), lon = num(p.longitude);
+      if (lat == null || lon == null) continue;
+      const m = L.circleMarker([lat, lon], {
+        radius: radius(n0(p.nameplate_mw)), color: p.interconnection_flag ? css('--accent') : ink,
+        weight: p.interconnection_flag ? 1.5 : 0.6, opacity: 0.7,
+        fillColor: css(TECH_VAR[p.tech_group] || '--tech-other'), fillOpacity: 0.82,
+      });
+      m.bindPopup(() => popup(p), { maxWidth: 300 });
+      m.on('click', () => { S.picked = p.eia_plant_id; markRow(); });
+      m.addTo(layer);
+      markers.set(p.eia_plant_id, m);
+    }
+    const out = list.filter((p) => num(p.latitude) != null && !map.getBounds().pad(0.6).contains([+p.latitude, +p.longitude])).length;
+    document.getElementById('map-note').textContent =
+      `${fmtInt(markers.size)} plants shown.` + (out ? ` ${out} sit outside this view; zoom out to see them.` : '') +
+      ' Dots with an orange outline report connecting to a utility outside PJM.';
+  }
+
   // ------------------------------------------------------------------ owners
   function buildOwners() {
     const by = d3.rollup(plants, (v) => ({
@@ -194,17 +341,13 @@
   }
   function drawOwners() {
     const tb = document.querySelector('#owner-table tbody');
-    const frag = document.createDocumentFragment();
-    for (const o of owners) {
-      const tr = document.createElement('tr');
+    tb.replaceChildren(...owners.map((o) => {
+      const tr = el('tr');
       tr.dataset.key = o.name;
       if (S.owner === o.name) tr.className = 'on';
-      for (const [v, cls] of [[o.name, 'wrap-cell'], [fmtInt(o.plants), 'num'], [fmtInt(Math.round(o.mw)), 'num'], [fmt1(o.gwh / 1000), 'num']]) {
-        const td = document.createElement('td'); td.className = cls; td.textContent = v; tr.append(td);
-      }
-      frag.append(tr);
-    }
-    tb.replaceChildren(frag);
+      for (const [v, cls] of [[o.name, 'wrap-cell'], [fmtInt(o.plants), 'num'], [fmt1(o.mw), 'num'], [fmtInt(Math.round(o.gwh)), 'num']]) tr.append(el('td', cls, v));
+      return tr;
+    }));
   }
   document.querySelector('#owner-table tbody').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-key]');
@@ -212,17 +355,13 @@
     S.owner = S.owner === tr.dataset.key ? '' : tr.dataset.key;
     S.picked = null;
     drawOwners(); drawPlants();
-    if (S.owner) document.getElementById('plants').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (S.owner) document.getElementById('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
   function drawRec() {
-    const tb = document.querySelector('#rec-table tbody');
-    tb.replaceChildren(...rec.map((r) => {
-      const tr = document.createElement('tr');
-      tr.style.cursor = 'default';
-      for (const [v, cls] of [[r.step, 'num'], [r.basis, 'wrap-cell'], [fmtInt(+r.units), 'num'], [fmt1(+r.gw), 'num']]) {
-        const td = document.createElement('td'); td.className = cls; td.textContent = v; tr.append(td);
-      }
+    document.querySelector('#rec-table tbody').replaceChildren(...rec.map((r) => {
+      const tr = el('tr'); tr.style.cursor = 'default';
+      for (const [v, cls] of [[r.step, 'num'], [r.basis, 'wrap-cell'], [fmtInt(+r.units), 'num'], [fmt1(+r.gw), 'num']]) tr.append(el('td', cls, v));
       return tr;
     }));
   }
@@ -247,10 +386,9 @@
       ['gen_total_gwh', 'Total GWh', 'num', 'num'],
     ];
     head.replaceChildren(...cols.map(([field, label, cls, kind]) => {
-      const th = document.createElement('th');
-      if (cls === 'num') th.className = 'num';
-      const b = document.createElement('button');
-      b.type = 'button'; b.className = 'sort'; b.textContent = label; b.dataset.field = field;
+      const th = el('th', cls === 'num' ? 'num' : '');
+      const b = el('button', 'sort', label);
+      b.type = 'button'; b.dataset.field = field;
       b.addEventListener('click', () => {
         if (S.sort === field) S.dir = -S.dir; else { S.sort = field; S.dir = kind === 'num' ? -1 : 1; }
         drawPlants();
@@ -258,46 +396,56 @@
       th.append(b);
       return th;
     }));
-    const groups = [...new Set(plants.map((p) => p.tech_group))];
-    for (const g of TECH_ORDER.filter((k) => groups.includes(k)).concat(groups.filter((k) => !TECH_ORDER.includes(k)))) techSel.append(new Option(g, g));
+  }
+
+  function techOptions() {
+    techSel.replaceChildren(new Option('All technologies', ''),
+      ...techOrder([...new Set(plants.map((p) => p.tech_group))]).map((g) => new Option(g, g)));
+    techSel.value = S.tech;
+  }
+
+  function filtered() {
+    const q = S.q.trim().toLowerCase();
+    return plants.filter((r) => (!S.tech || r.tech_group === S.tech) && (!S.site || r.site === S.site) &&
+      (!S.owner || r.parent_owner === S.owner) &&
+      (!q || [r.plant_name, r.parent_owner, r.ownership_detail, r.eia_operator, r.county, r.state, r.pjm_zone].join(' ').toLowerCase().includes(q)));
   }
 
   function drawPlants() {
     head.querySelectorAll('.sort').forEach((b) => b.setAttribute('aria-sort', b.dataset.field === S.sort ? (S.dir > 0 ? 'ascending' : 'descending') : 'none'));
     ownerBtn.hidden = !S.owner;
     ownerBtn.textContent = S.owner ? S.owner + '  ×' : '';
-    const q = S.q.trim().toLowerCase();
     const kind = new Map(cols.map((c) => [c[0], c[3]]));
-    const list = plants.filter((r) => (!S.tech || r.tech_group === S.tech) && (!S.site || r.site === S.site) &&
-      (!S.owner || r.parent_owner === S.owner) &&
-      (!q || [r.plant_name, r.parent_owner, r.ownership_detail, r.eia_operator, r.county, r.state, r.pjm_zone].join(' ').toLowerCase().includes(q)))
-      .sort((a, b) => {
-        const k = S.sort;
-        if (kind.get(k) === 'num') {
-          const av = num(a[k]), bv = num(b[k]);
-          if (av == null && bv == null) return 0; if (av == null) return 1; if (bv == null) return -1;
-          return S.dir * (av - bv);
-        }
-        return S.dir * String(a[k] ?? '').localeCompare(String(b[k] ?? ''));
-      });
+    const list = filtered().sort((a, b) => {
+      const k = S.sort;
+      if (kind.get(k) === 'num') {
+        const av = num(a[k]), bv = num(b[k]);
+        if (av == null && bv == null) return 0; if (av == null) return 1; if (bv == null) return -1;
+        return S.dir * (av - bv);
+      }
+      return S.dir * String(a[k] ?? '').localeCompare(String(b[k] ?? ''));
+    });
     document.getElementById('plant-count').textContent =
       `${fmtInt(list.length)} plants · ${fmtInt(Math.round(d3.sum(list, (r) => n0(r.nameplate_mw))))} MW`;
 
     const frag = document.createDocumentFragment();
     for (const r of list) {
-      const tr = document.createElement('tr');
+      const tr = el('tr');
       tr.dataset.key = r.eia_plant_id;
-      if (S.picked === r.eia_plant_id) tr.className = 'on';
       for (const [field, , cls, k] of cols) {
-        const td = document.createElement('td');
-        if (cls) td.className = cls;
-        if (k === 'num') { const v = num(r[field]); td.textContent = v == null ? '' : fmt1(v); }
-        else td.textContent = r[field] ?? '';
-        tr.append(td);
+        const v = k === 'num' ? (num(r[field]) == null ? '' : fmt1(num(r[field]))) : (r[field] ?? '');
+        tr.append(el('td', cls, v));
       }
       frag.append(tr);
     }
     document.querySelector('#plant-table tbody').replaceChildren(frag);
+    markRow();
+    drawMap(list);
+  }
+
+  function markRow() {
+    document.querySelectorAll('#plant-table tbody tr.on').forEach((tr) => tr.classList.remove('on'));
+    if (S.picked) document.querySelector(`#plant-table tr[data-key="${CSS.escape(S.picked)}"]`)?.classList.add('on');
     drawDetail();
   }
 
@@ -311,19 +459,18 @@
       ['owner_basis', 'How the owner was found'], ['owner_source_url', 'Ownership source'],
       ['eia_operator', 'EIA operating entity'], ['technology', 'EIA technology'], ['site', 'Site'],
       ['status', 'Status'], ['county', 'County'], ['interconnecting_utility', 'Interconnecting utility'],
-      ['net_summer_mw', 'Net summer MW'], ['eia_plant_id', 'EIA plant ID'],
+      ['interconnection_flag', 'Interconnection note'], ['net_summer_mw', 'Net summer MW'], ['eia_plant_id', 'EIA plant ID'],
     ];
     for (const [field, label] of items) {
       const v = r[field];
       if (v == null || v === '') continue;
-      const d = document.createElement('div');
-      const k = document.createElement('span'); k.className = 'k'; k.textContent = label;
-      const val = document.createElement('span'); val.className = 'v';
+      const d = el('div');
+      const val = el('span', 'v');
       if (field === 'owner_source_url' && /^https?:\/\//.test(v)) {
-        const a = document.createElement('a'); a.href = v; a.target = '_blank'; a.rel = 'noopener'; a.textContent = v;
+        const a = el('a', null, v); a.href = v; a.target = '_blank'; a.rel = 'noopener';
         val.append(a);
       } else val.textContent = v;
-      d.append(k, val);
+      d.append(el('span', 'k', label), val);
       detail.append(d);
     }
   }
@@ -332,27 +479,50 @@
     const tr = e.target.closest('tr[data-key]');
     if (!tr) return;
     S.picked = S.picked === tr.dataset.key ? null : tr.dataset.key;
-    drawPlants();
+    markRow();
+    const m = S.picked && markers.get(S.picked);
+    if (m && map) { map.panTo(m.getLatLng()); m.openPopup(); }
     if (S.picked) detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
   let qt;
   document.getElementById('plant-q').addEventListener('input', (e) => {
-    clearTimeout(qt); qt = setTimeout(() => { S.q = e.target.value; drawPlants(); }, 150);
+    clearTimeout(qt); qt = setTimeout(() => { S.q = e.target.value; drawPlants(); }, 200);
   });
   techSel.addEventListener('change', () => { S.tech = techSel.value; drawPlants(); });
   document.getElementById('plant-site').addEventListener('change', (e) => { S.site = e.target.value; drawPlants(); });
   ownerBtn.addEventListener('click', () => { S.owner = ''; drawOwners(); drawPlants(); });
 
+  // ------------------------------------------------------------------ tabs
+  function showTab(tab) {
+    if (!TABS[tab]) tab = 'large';
+    S.tab = tab;
+    S.tech = ''; S.owner = ''; S.picked = null;
+    document.querySelectorAll('.sitenav a').forEach((a) => {
+      if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+    plants = ALL.filter((p) => p.size_class === TABS[tab].cls);
+    document.getElementById('gen-title').textContent = `Electricity generated by ${TABS[tab].label} built since 2015`;
+    if (map) map.closePopup();
+    summarize();
+    footnote();
+    drawChart();
+    buildOwners(); drawOwners();
+    techOptions();
+    drawPlants();
+  }
+  window.addEventListener('hashchange', () => showTab(location.hash.slice(1)));
+
   // ------------------------------------------------------------------ load
   Promise.all([d3.csv(DATA + 'plants.csv'), d3.csv(DATA + 'coverage.csv'), d3.csv(DATA + 'reconciliation.csv')])
     .then(([p, c, r]) => {
-      plants = p; coverage = c; rec = r;
+      ALL = p; coverage = c; rec = r;
       yearCols = p.columns.filter((k) => /^gen_\d{4}_gwh$/.test(k)).sort();
-      summarize();
-      drawChart();
-      buildOwners(); drawOwners();
+      lastFull = Math.max(...coverage.filter((x) => +x.months === 12).map((x) => +x.year));
+      partial = coverage.filter((x) => +x.months < 12).sort((a, b) => b.year - a.year)[0] || null;
       drawRec();
-      buildHead(); drawPlants();
+      buildHead();
+      initMap();
+      showTab(location.hash.slice(1));
       let rw;
       new ResizeObserver(() => { clearTimeout(rw); rw = setTimeout(drawChart, 120); }).observe(box);
     })
