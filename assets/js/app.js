@@ -9,7 +9,15 @@
   const TABS = {
     large: { cls: '5 MW and up', label: 'plants of 5 MW or more' },
     small: { cls: 'under 5 MW', label: 'plants under 5 MW' },
+    treemap: { cls: null, label: 'all new plants' },
   };
+  const FUEL_ORDER = ['Natural gas', 'Solar', 'Wind', 'Hydro', 'Biomass', 'Petroleum', 'Other gases', 'Battery storage'];
+  const FUEL_VAR = {
+    'Natural gas': '--fuel-gas', Solar: '--fuel-solar', Wind: '--fuel-wind', Hydro: '--fuel-hydro',
+    Biomass: '--fuel-biomass', Petroleum: '--fuel-petroleum', Coal: '--fuel-coal', Nuclear: '--fuel-nuclear',
+    'Battery storage': '--fuel-storage', 'Other gases': '--fuel-other',
+  };
+  const fuelColor = (f) => css(FUEL_VAR[f] || '--fuel-other');
   const TECH_ORDER = ['Gas combined cycle', 'Gas & oil peaking', 'Solar', 'Wind', 'Storage', 'Other'];
   const TECH_VAR = {
     'Gas combined cycle': '--tech-gas-cc', 'Gas & oil peaking': '--tech-gas-peak', Solar: '--tech-solar',
@@ -92,7 +100,6 @@
       `* ${partial.year} runs January to ${lastM}, and ${pct}% of this tab's online capacity has reported for it so far, ` +
       'because smaller plants report to EIA once a year; the bar will grow when EIA publishes annual data. ' +
       'Battery output is net of charging, so storage reads slightly negative and is left off the bars.';
-    document.getElementById('vintage').textContent = `EIA-860M Sep 2026 · EIA-923 through ${lastM} ${partial.year}`;
   }
 
   // ------------------------------------------------------------------ chart
@@ -239,7 +246,10 @@
     map.on('click focus', () => map.scrollWheelZoom.enable());
     map.on('mouseout blur', () => map.scrollWheelZoom.disable());
     layer = L.layerGroup().addTo(map);
+    // opened on the treemap tab the map starts hidden at zero size; fit it once it shows
+    mapNeedsFit = mapHost.offsetWidth === 0;
   }
+  let mapNeedsFit = false;
 
   function sparkline(p) {
     const NS = 'http://www.w3.org/2000/svg';
@@ -492,6 +502,171 @@
   document.getElementById('plant-site').addEventListener('change', (e) => { S.site = e.target.value; drawPlants(); });
   ownerBtn.addEventListener('click', () => { S.owner = ''; drawOwners(); drawPlants(); });
 
+  // ------------------------------------------------------------------ fuel treemap
+  // Every plant of any size, nested fuel -> plant, as 50 States of Electricity's mix
+  // treemap does by source. A treemap cannot show a negative area, so fuels that net
+  // negative over the period (batteries, which are net of charging) go in the table
+  // and the footnote instead.
+  const tmBox = document.getElementById('tm-chart');
+  const tmPeriod = document.getElementById('tm-period');
+  const tmTip = el('div', 'tip'); tmTip.hidden = true;
+  let pendingPick = null;
+  const inkOn = (c) => { const r = d3.rgb(c); return (0.2126 * r.r + 0.7152 * r.g + 0.0722 * r.b) / 255 > 0.55 ? '#1c1c1c' : '#ffffff'; };
+  const energy = (gwh) => (Math.abs(gwh) >= 1000 ? fmt1(gwh / 1000) + ' TWh' : fmtInt(Math.round(gwh)) + ' GWh');
+  const pctOf = (v, t) => { const x = 100 * v / t; return x >= 10 ? Math.round(x) + '%' : x >= 0.1 ? x.toFixed(1) + '%' : '<0.1%'; };
+
+  function periodOptions() {
+    const lastM = partial ? new Date(Date.UTC(+partial.year, +partial.months - 1, 1)).toLocaleString('en', { month: 'short', timeZone: 'UTC' }) : 'Dec';
+    const lastY = yearCols.length ? yearCols[yearCols.length - 1].slice(4, 8) : '';
+    tmPeriod.replaceChildren(new Option(`All years, Jan 2015 – ${lastM} ${lastY}`, 'gen_total_gwh'),
+      ...[...yearCols].reverse().map((c) => {
+        const y = c.slice(4, 8);
+        return new Option(partial && +y === +partial.year ? `${y} (Jan – ${lastM})` : y, c);
+      }));
+  }
+
+  function fuelTotals(col) {
+    const by = d3.rollup(ALL, (v) => ({
+      plants: v.length, mw: d3.sum(v, (p) => n0(p.nameplate_mw)), gwh: d3.sum(v, (p) => n0(p[col])),
+    }), (p) => p.fuel);
+    const order = (f) => { const i = FUEL_ORDER.indexOf(f); return i < 0 ? 99 : i; };
+    return [...by].map(([fuel, o]) => ({ fuel, ...o })).sort((a, b) => b.gwh - a.gwh || order(a.fuel) - order(b.fuel));
+  }
+
+  function drawTreemap() {
+    const col = tmPeriod.value || 'gen_total_gwh';
+    const fuels = fuelTotals(col);
+    const pos = fuels.filter((f) => f.gwh > 0);
+    const neg = fuels.filter((f) => f.gwh <= 0 && ALL.some((p) => p.fuel === f.fuel && num(p[col]) != null));
+    const total = d3.sum(pos, (f) => f.gwh);
+    const period = tmPeriod.selectedOptions[0]?.textContent || '';
+
+    // lede and title follow the period
+    const lede = document.getElementById('lede');
+    const b = (t) => el('b', null, t);
+    const txt = (t) => document.createTextNode(t);
+    const [f1, f2, f3] = pos;
+    lede.replaceChildren(txt('The '), b(fmtInt(ALL.length)), txt(' power plants that came online in PJM since January 2015 generated '),
+      b(energy(total)), txt(col === 'gen_total_gwh' ? ` through ${period.split('– ')[1] || 'the latest month'}. ` : ` in ${period}. `));
+    if (f1) lede.append(b(f1.fuel), txt(` plants produced ${pctOf(f1.gwh, total)} of it`));
+    if (f2) lede.append(txt(', '), b(f2.fuel.toLowerCase()), txt(' ' + pctOf(f2.gwh, total)));
+    if (f3) lede.append(txt(' and '), b(f3.fuel.toLowerCase()), txt(' ' + pctOf(f3.gwh, total)));
+    lede.append(txt('.'));
+
+    // legend
+    document.getElementById('tm-legend').replaceChildren(...pos.map((f) => {
+      const li = el('li'); const i = el('i'); i.style.background = fuelColor(f.fuel);
+      li.append(i, txt(f.fuel + ' '), b(pctOf(f.gwh, total)));
+      return li;
+    }));
+
+    // layout
+    const data = {
+      children: pos.map((f) => ({
+        fuel: f.fuel,
+        children: ALL.filter((p) => p.fuel === f.fuel && n0(p[col]) > 0).map((p) => ({ p, value: n0(p[col]) })),
+      })),
+    };
+    const root = d3.hierarchy(data).sum((d) => d.value || 0).sort((a, b) => b.value - a.value);
+    const W = Math.max(300, tmBox.clientWidth);
+    const H = W < 640 ? Math.round(W * 1.4) : Math.max(480, Math.round(W * 0.5));
+    // a fuel block big enough to label gets a header strip, so its name never sits on a plant's
+    const HEAD = 24;
+    const headed = (n) => n.depth === 1 && n.x1 - n.x0 > 80 && n.y1 - n.y0 > 70;
+    d3.treemap().size([W, H]).tile(d3.treemapSquarify)
+      .paddingInner((n) => (n.depth === 0 ? 3 : 0.75))
+      .paddingTop((n) => (headed(n) ? HEAD : 0))(root);
+
+    tmBox.replaceChildren();
+    const svg = d3.select(tmBox).append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('height', H);
+    const fuelOf = new Map(pos.map((f) => [f.fuel, f]));
+
+    for (const group of root.children || []) {
+      const base = d3.color(fuelColor(group.data.fuel));
+      const g = svg.append('g');
+      group.leaves().forEach((leaf, i) => {
+        // neighbouring plants alternate a step lighter and darker so the tiles read apart
+        const fill = base.brighter(((i % 3) - 1) * 0.18).formatHex();
+        const w = leaf.x1 - leaf.x0, h = leaf.y1 - leaf.y0;
+        g.append('rect').attr('class', 'tile-plant').attr('x', leaf.x0).attr('y', leaf.y0)
+          .attr('width', Math.max(0, w)).attr('height', Math.max(0, h)).attr('fill', fill)
+          .datum(leaf.data.p)
+          .on('mousemove', (event, p) => tmTooltip(event, p, col, total, fuelOf.get(p.fuel)))
+          .on('mouseleave', () => { tmTip.hidden = true; })
+          .on('click', (event, p) => openPlant(p));
+        if (w > 84 && h > 34) {
+          const ink = inkOn(fill);
+          const name = g.append('text').attr('class', 'lbl-plant').attr('x', leaf.x0 + 6).attr('y', leaf.y0 + 15).attr('fill', ink).text(leaf.data.p.plant_name);
+          // shorten a name that does not fit rather than let it spill out of its tile
+          let t = leaf.data.p.plant_name;
+          while (t.length > 3 && name.node().getComputedTextLength() > w - 12) { t = t.slice(0, -2); name.text(t.trimEnd() + '…'); }
+          if (h > 50) g.append('text').attr('class', 'lbl-plant').attr('x', leaf.x0 + 6).attr('y', leaf.y0 + 29)
+            .attr('fill', ink).attr('opacity', 0.8).text(energy(leaf.value));
+        }
+      });
+      // the fuel's name and total in its header strip, in a darker step of its colour
+      if (headed(group)) {
+        const gw = group.x1 - group.x0;
+        const strip = base.darker(0.35).formatHex();
+        svg.append('rect').attr('x', group.x0).attr('y', group.y0).attr('width', gw).attr('height', HEAD - 1).attr('fill', strip);
+        const ink = inkOn(strip);
+        const t = svg.append('text').attr('x', group.x0 + 8).attr('y', group.y0 + 16.5).attr('fill', ink);
+        t.append('tspan').attr('class', 'lbl-fuel').text(group.data.fuel);
+        const v = t.append('tspan').attr('class', 'lbl-fuel-v').attr('dx', 8).text(`${energy(group.value)} · ${pctOf(group.value, total)}`);
+        if (t.node().getComputedTextLength() > gw - 14) v.remove();
+        if (t.node().getComputedTextLength() > gw - 14) t.remove();
+      }
+    }
+    tmBox.append(tmTip);
+
+    // the table twin and the footnote
+    document.querySelector('#fuel-table tbody').replaceChildren(...fuels.map((f) => {
+      const tr = el('tr'); tr.style.cursor = 'default';
+      const name = el('td', 'wrap-cell'); const i = el('i'); i.className = 'sw';
+      i.style.cssText = `display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:8px;background:${fuelColor(f.fuel)}`;
+      name.append(i, txt(f.fuel));
+      tr.append(name, el('td', 'num', fmtInt(f.plants)), el('td', 'num', fmtInt(Math.round(f.mw))),
+        el('td', 'num', Math.abs(f.gwh) >= 100 ? fmt1(f.gwh / 1000) : (f.gwh / 1000).toFixed(3)),
+        el('td', 'num', f.gwh > 0 ? pctOf(f.gwh, total) : 'net negative'));
+      return tr;
+    }));
+    document.getElementById('fuel-sub').textContent = `The same totals as a table, for ${col === 'gen_total_gwh' ? 'all years' : period}. Shares are of positive generation.`;
+    const notes = [];
+    if (neg.length) notes.push(`${neg.map((f) => f.fuel).join(' and ')} ${neg.length > 1 ? 'net' : 'nets'} negative for this period (batteries draw more power charging than they return), so ${neg.length > 1 ? 'they are' : 'it is'} in the table but not the treemap.`);
+    if (partial && (col === 'gen_total_gwh' || +col.slice(4, 8) === +partial.year))
+      notes.push(`${partial.year} runs only through ${new Date(Date.UTC(+partial.year, +partial.months - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' })}, and small plants have not yet reported it.`);
+    notes.push('A plant with more than one technology, such as solar with a battery, is placed under its largest one by capacity.');
+    document.getElementById('tm-note').textContent = notes.join(' ');
+  }
+
+  function tmTooltip(event, p, col, total, fuel) {
+    const v = n0(p[col]);
+    const row = (k, val) => { const r = el('div', 'tip__r'); r.append(txt2(k), el('b', null, val)); return r; };
+    const txt2 = (t) => document.createTextNode(t);
+    tmTip.replaceChildren(
+      el('div', 'tip__h', p.plant_name),
+      el('div', 'tip__r', `${p.fuel} · ${p.tech_group} · ${fmt1(n0(p.nameplate_mw))} MW`),
+      el('div', 'tip__r', `${p.parent_owner}`),
+      el('div', 'tip__r', `${p.county}, ${p.state} · online ${monthName(p.first_unit_online)}`),
+      row('Generated', energy(v)),
+      row('Share of all new plants', pctOf(v, total)),
+      row('Share of ' + p.fuel.toLowerCase(), pctOf(v, fuel.gwh)),
+    );
+    tmTip.hidden = false;
+    const [px, py] = d3.pointer(event, tmBox);
+    const tw = tmTip.offsetWidth, th = tmTip.offsetHeight;
+    tmTip.style.left = Math.max(0, px + 16 + tw > tmBox.clientWidth ? px - tw - 16 : px + 16) + 'px';
+    tmTip.style.top = Math.max(0, Math.min(tmBox.clientHeight - th, py + 12)) + 'px';
+  }
+
+  // a treemap tile opens the plant on its own size tab, selected in the table and on the map
+  function openPlant(p) {
+    pendingPick = p.eia_plant_id;
+    location.hash = p.size_class === 'under 5 MW' ? 'small' : 'large';
+  }
+
+  tmPeriod.addEventListener('change', drawTreemap);
+
   // ------------------------------------------------------------------ tabs
   function showTab(tab) {
     if (!TABS[tab]) tab = 'large';
@@ -500,6 +675,15 @@
     document.querySelectorAll('.sitenav a').forEach((a) => {
       if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
+    const isTm = tab === 'treemap';
+    document.querySelectorAll('.ledger-only').forEach((n) => { n.hidden = isTm; });
+    document.querySelectorAll('.tm-only').forEach((n) => { n.hidden = !isTm; });
+    if (isTm) {
+      if (map) map.closePopup();
+      drawTreemap();
+      return;
+    }
+    tmTip.hidden = true;
     plants = ALL.filter((p) => p.size_class === TABS[tab].cls);
     document.getElementById('gen-title').textContent = `Electricity generated by ${TABS[tab].label} built since 2015`;
     if (map) map.closePopup();
@@ -509,6 +693,19 @@
     buildOwners(); drawOwners();
     techOptions();
     drawPlants();
+    if (map) {
+      map.invalidateSize();
+      if (mapNeedsFit) { map.fitBounds(PJM_BOUNDS); mapNeedsFit = false; drawMap(filtered()); }
+    }
+    if (pendingPick) {
+      S.picked = pendingPick;
+      pendingPick = null;
+      markRow();
+      document.querySelector(`#plant-table tr[data-key="${CSS.escape(S.picked)}"]`)?.scrollIntoView({ block: 'nearest' });
+      const m = markers.get(S.picked);
+      if (m && map) { map.setView(m.getLatLng(), Math.max(map.getZoom(), 8)); m.openPopup(); }
+      document.getElementById('map').scrollIntoView({ block: 'start' });
+    }
   }
   window.addEventListener('hashchange', () => showTab(location.hash.slice(1)));
 
@@ -521,10 +718,16 @@
       partial = coverage.filter((x) => +x.months < 12).sort((a, b) => b.year - a.year)[0] || null;
       drawRec();
       buildHead();
+      if (partial) {
+        const lastM = new Date(Date.UTC(+partial.year, +partial.months - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' });
+        document.getElementById('vintage').textContent = `EIA-860M Sep 2026 · EIA-923 through ${lastM} ${partial.year}`;
+      }
       initMap();
+      periodOptions();
       showTab(location.hash.slice(1));
-      let rw;
-      new ResizeObserver(() => { clearTimeout(rw); rw = setTimeout(drawChart, 120); }).observe(box);
+      let rw, rt;
+      new ResizeObserver(() => { clearTimeout(rw); rw = setTimeout(() => { if (S.tab !== 'treemap') drawChart(); }, 120); }).observe(box);
+      new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => { if (S.tab === 'treemap') drawTreemap(); }, 120); }).observe(tmBox);
     })
     .catch((err) => {
       document.getElementById('lede').textContent = 'The data files did not load (' + err.message + '). Reload the page to try again.';

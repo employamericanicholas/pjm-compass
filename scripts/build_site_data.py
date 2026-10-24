@@ -74,12 +74,23 @@ def parent_name(name):
     return name
 
 
-def dominant_tech(units):
-    """A hybrid site's group is that of its largest technology by MW."""
-    t = (units.groupby(["eia_plant_id", "technology"]).capacity_added_mw.sum()
+# EIA energy source code -> fuel, grouped as 50 States of Electricity groups them
+# (landfill gas is biomass; blast-furnace and other manufactured gases are "other")
+FUEL = {
+    "NG": "Natural gas", "SUN": "Solar", "WND": "Wind", "WAT": "Hydro",
+    "DFO": "Petroleum", "RFO": "Petroleum", "JF": "Petroleum", "KER": "Petroleum", "WO": "Petroleum",
+    "LFG": "Biomass", "OBG": "Biomass", "WDS": "Biomass", "AB": "Biomass", "MSB": "Biomass", "OBS": "Biomass",
+    "MWH": "Battery storage", "NUC": "Nuclear", "BIT": "Coal", "SUB": "Coal",
+    "BFG": "Other gases", "OG": "Other gases",
+}
+
+
+def dominant(units, col, mapping, default):
+    """A hybrid site takes the group of its largest component by MW."""
+    t = (units.groupby(["eia_plant_id", col]).capacity_added_mw.sum()
               .reset_index().sort_values("capacity_added_mw", ascending=False)
               .drop_duplicates("eia_plant_id"))
-    return t.set_index("eia_plant_id").technology.map(lambda x: TECH_GROUP.get(x, "Other"))
+    return t.set_index("eia_plant_id")[col].map(lambda x: mapping.get(x, default))
 
 
 def main():
@@ -90,7 +101,8 @@ def main():
     g = pd.read_csv(GEN)
     last_year = int(g.year.max())
 
-    r["tech_group"] = r.eia_plant_id.map(dominant_tech(u))
+    r["tech_group"] = r.eia_plant_id.map(dominant(u, "technology", TECH_GROUP, "Other"))
+    r["fuel"] = r.eia_plant_id.map(dominant(u, "energy_source", FUEL, "Other"))
 
     # ---- ownership: researched parent > EIA-860 lead equity owner > EIA operator
     own = pd.read_csv(OWNERS) if os.path.exists(OWNERS) else pd.DataFrame(
@@ -126,7 +138,7 @@ def main():
         lambda v: "reports a utility in %s, not PJM" % v if pd.notna(v) else "")
 
     keep = ["eia_plant_id", "plant_name", "parent_owner", "ownership_detail", "owner_basis",
-            "owner_source_url", "owner", "tech_group", "technology", "site", "size_class",
+            "owner_source_url", "owner", "tech_group", "fuel", "technology", "site", "size_class",
             "status", "first_unit_online", "capacity_added_mw", "net_summer_mw", "state",
             "county", "latitude", "longitude", "pjm_zone", "interconnecting_utility",
             "interconnection_flag", "capacity_factor_est", "gen_reported",

@@ -124,4 +124,12 @@ To refresh with a newer EIA-860M, download it and update `LATEST`, `LATEST_LABEL
 The site is static: `index.html`, `assets/`, and the CSVs in `output/site/`, served
 by GitHub Pages from `main`. It has two tabs, plants of 5 MW and up (`#large`) and
 under 5 MW (`#small`), each with its own totals, generation chart, plant map
-(Leaflet on OpenStreetMap tiles), owner ranking and plant table.
+(Leaflet on OpenStreetMap tiles), owner ranking and plant table. A third tab
+(`#treemap`) shows all generation from every new plant as a treemap, fuel blocks
+nested into plant tiles, in the fuel colours of 50 States of Electricity, with a
+period selector and a fuel table. Each plant's fuel is that of its largest units by
+capacity (`FUEL` in `scripts/build_site_data.py`); batteries net negative and are
+left out of the treemap.
+
+Generation since 2015 by fuel: natural gas 1,438 TWh (86%), solar 113 TWh (6.8%),
+wind 102 TWh (6.1%), hydro 7 TWh (0.4%), everything else under 0.1% each.
